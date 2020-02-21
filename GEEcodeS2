@@ -1,0 +1,147 @@
+// This script uses the Sentinel-2 QA band to cloud mask the collection
+// The Sentinel-2 cloud flags are less
+// selective, so the collection is also pre-filtered by the
+// CLOUDY_PIXEL_PERCENTAGE flag, to use only relatively
+// cloud-free granule.
+// Also adjust colors depending on brightness and water amount
+// Resulting mosaic is just for a nice illustration and is not ! suitable for further remote sensing (e.g. spectral indices)
+
+// Geometry - can be changed
+
+var geometry = 
+    /* color: #98ff00 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[4.334782076759325, 48.94155194125023],
+          [4.334782076759325, 44.89977484021347],
+          [12.882145358009325, 44.89977484021347],
+          [12.882145358009325, 48.94155194125023]]], null, false);
+
+//////////////////////////////////////////////////////////////////////////////////////////
+// Function to mask clouds using the Sentinel-2 QA band.
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60')
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+             qa.bitwiseAnd(cirrusBitMask).eq(0))
+
+  // Return the masked and scaled data, without the QA bands.
+  return image.updateMask(mask).divide(10)
+      .select("B.*")
+      .copyProperties(image, ["system:time_start"])
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////
+// Map the function over one year of data and take the median.
+// Load Sentinel-2 TOA reflectance data.
+
+var bands = ['B2', 'B3', 'B4', 'B8','B9', 'B11', 'QA60'];
+
+// Adjust the date for the mosaic to achieve a cloud free product for AOI
+var collection = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate('2018-05-01', '2018-10-31')
+    // Pre-filter to get less cloudy granules.
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .filterBounds(geometry)
+    .select(bands)
+    .map(maskS2clouds)
+
+var composite = collection.median().clip(geometry)
+
+//////////////////////////////////////////////////////////////////////////////////////////
+// Display parameters
+
+var vizParamsCIR = {
+  bands: ['B11', 'B4', 'B3'],
+  min: 0,
+  max: 400,
+  gamma: [1.1, 1.1, 1]
+};
+
+var vizParamsRGB = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 35,
+  max: 320,
+  gamma: [1.7, 1.8, 1.2]
+};
+
+ var vizParamsBRIGHT = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 40,
+  max: 800,
+  gamma: [3.5, 3.55, 3.3]
+};
+
+ var vizParamsWATER = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 40,
+  max: 320,
+  gamma: [1.7, 1.7, 1.3]
+};
+
+//////////////////////////////////////////////////////////////////////////////////////////
+// Additional maps to be displyed if desired
+
+//Map.addLayer(composite, vizParamsCIR, 'CIR') //false color image
+//Map.addLayer(composite, vizParamsRGB, 'RGB')  //original not improved RGB image
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//add a snow layer to adjust colors for snow areas (make bright areas less overfitted)
+
+var mask = composite.gt(200);
+var bright = mask;
+bright = composite.mask(bright);
+
+//Map.addLayer(bright, {min:-1, max:1}, 'bright'); // displays the area to get darkened
+
+
+// add watermask to display water more blue
+var indices = ee.Image.cat(
+  composite.expression("(green - nir) / (green + nir)", {
+  nir: composite.select("B8"),
+  green: composite.select("B4")
+}).rename("ndwi"),
+  composite.expression("(green - mir) / (green + mir)", {
+  mir: composite.select("B11"),
+  green: composite.select("B4")
+}).rename("mndwi"))
+
+var watermask = indices.expression('b("ndwi") > 0 && b("mndwi") > 0.3')
+var snowmask = composite.select("B4").gt(180);
+var snowmask2 = snowmask.not();
+var water = watermask.mask(snowmask2);
+water = composite.mask(water);
+
+//Map.addLayer(water, {min:-1, max:1} , 'water') // displays water area
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//Mosaic the different surface types with different visualizations
+
+var mosaic = ee.ImageCollection([
+  composite.visualize(vizParamsRGB),
+  bright.visualize(vizParamsBRIGHT),
+  water.visualize(vizParamsWATER),
+]).mosaic();
+
+Map.addLayer(mosaic, {}, 'custom mosaic'); 
+
+//////////////////////////////////////////////////////////////////////////////////////////
+// Export the result into GoogleDrive
+
+ Export.image.toDrive({
+  image: mosaic,
+  description: 'S2_mosaic_2018',
+  region: geometry,
+  maxPixels: 5000000000,
+});  
